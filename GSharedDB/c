@@ -1,0 +1,236 @@
+# -*- coding: utf-8 -*-
+import av
+import io
+import threading
+import av.container
+import av.stream
+
+
+class ICodecCallback:
+    def on_data(self, audio_data, video_data):
+        pass
+
+
+class ICodec:
+    def __init__(self):
+        self._container = None
+
+    def flush(self):
+        return None
+
+    def close(self):
+        if self._container is not None:
+            self._container.close()
+            self._container = None
+
+    def process(self, audio, video) -> any:
+        pass
+
+    @property
+    def audio_stream(self):
+        return None
+
+    @property
+    def video_stream(self):
+        return None
+
+
+class Encoder(ICodec):
+    def __init__(self, format: str):
+        super().__init__()
+        self._buffer = io.BytesIO()
+        self._container: av.container.Container = av.open(self._buffer, 'w', format=format)
+
+    def add_stream(self, codec_name: str, **options) -> av.stream.Stream:
+        self._stream = self._container.add_stream(codec_name, **options)
+        return self._stream
+
+    def mux(self, packet):
+        if self._container is not None and packet is not None:
+            self._container.mux(packet)
+        else:
+            raise ValueError("Stream not initialized. Call add_stream() first.")
+
+    def flush_codec(self):
+        for stream in self._container.streams:
+            for packet in stream.encode():
+                self._container.mux(packet)
+
+    @property
+    def audio_stream(self):
+        for stream in self._container.streams:
+            if stream.type == 'audio':
+                return stream
+        return None
+
+    @property
+    def video_stream(self):
+        for stream in self._container.streams:
+            if stream.type == 'video':
+                return stream
+        return None
+
+    def process(self, audio, video):
+        success = False
+        data = None
+        try:
+            audio_stream = self.audio_stream
+            video_stream = self.video_stream
+
+
+
+            if video and video_stream is not None:
+                # for i in range(60): # 60 frames = 2.5 seconds at 24 fps
+                for packet in video_stream.encode(video):
+                    self.mux(packet)
+                    success = True
+
+            if audio is not None and audio_stream is not None:
+                for packet in audio_stream.encode(audio):
+                    self.mux(packet)
+                    success = True
+
+            # Flush the codec to ensure all packets are written, 
+            # however, this is not launched in the original code.
+            # if used it will bug the output stream. by hanch
+            # self.flush_codec()
+            
+            data = self.load() # if success else None
+
+        except Exception as e:
+            print(f"Error encoding video frame: {e}")
+        finally:
+            return data
+
+    def load(self):
+        if self._container is not None:
+            data = self._buffer.getvalue()
+            self._buffer.seek(0)
+            self._buffer.truncate(0)
+            return data
+        return None
+
+    def close(self):
+        if self._container is not None:
+            self._container.close()
+            self._container = None
+        if self._buffer is not None:
+            self._buffer.close()
+            self._buffer = None
+        self._stream = None
+
+
+class Decoder(ICodec):
+
+    @property
+    def video_stream(self):
+        if self._container is not None:
+            video_stream = next(s for s in self._container.streams if s.type == "video")
+            assert video_stream is self.container.streams.video[0]
+            return video_stream
+        return None
+
+    @property
+    def audio_stream(self):
+        if self._container is not None:
+            audio_stream = next(s for s in self._container.streams if s.type == "audio")
+            assert audio_stream is self._container.streams.audio[0]
+            assert isinstance(audio_stream, av.AudioStream)
+            return audio_stream
+        return None
+
+    def __init__(self, url=None):
+        super().__init__()
+        if url is not None:
+            self._container: av.container.Container = av.open(url, 'r')
+
+    def audio_decode(self, cb: ICodecCallback):
+        audio_stream = self.audio_stream
+        if cb is not None:
+            if self._container is not None and audio_stream is not None:
+                for packet in self._container.demux(audio_stream):
+                    cb.on_data(packet, None)
+
+    def video_decode(self, cb: ICodecCallback):
+        if cb is not None:
+            if self._container is not None and self.video_stream is not None:
+                for packet in self._container.demux(self.audio_stream):
+                    cb.on_data(None, packet)
+
+    def close(self):
+        if self._container is not None:
+            self._container.close()
+            self._container = None
+
+
+class MediaCodec:
+
+    class CodecItem(threading.Thread):
+        def __init__(self, name):
+            threading.Thread.__init__(self)
+            self.name = name
+            self.encoder = None
+            self.decoder = None
+
+        def load(self, format, url):
+            self.decoder = Decoder(url)
+            self.encoder = Encoder(format)
+
+        def close(self):
+            if self.encoder is not None:
+                self.encoder.close()
+            if self.decoder is not None:
+                self.decoder.close()
+
+        ''' it is method for threading.Thread, but not used here
+        so just pass it. 
+        via decoder and encoder can be used in async way.'''
+        def run(self):
+            pass
+
+    @property
+    def encoder(self):
+        return self.getItem(self._curr_codec_name).encoder
+
+    @property
+    def decoder(self):
+        return self.getItem(self._curr_codec_name).decoder
+
+    '''    Get the codec item by name.
+    If name is None, return the first codec item.'''
+    def getItem(self, name):
+        with self._lock:
+            if name is None and len(self._codec_store) > 0:
+                return self._codec_store[0]
+            else:
+                for item in self._codec_store:
+                    if item.name == name:
+                        return item
+        return None
+
+    def __init__(self):
+        self._codec_store = []
+        self._lock = threading.Lock()
+        self._curr_codec_name = None
+
+    def add_codec(self, name, format, url=None):
+        with self._lock:
+            self._curr_codec_name = name
+            item = MediaCodec.CodecItem(name)
+            item.load(format=format, url=url)
+            self._codec_store.append(item)
+
+    def remove_codec(self, name):
+        with self._lock:
+            for item in self._codec_store:
+                if item.name == name:
+                    item.close()
+                    self._codec_store.remove(item)
+                    break
+
+    def close(self):
+        with self._lock:
+            for item in self._codec_store:
+                item.close()
+            self._codec_store.clear()
+            self._curr_codec_name = None
