@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>FLV WebSocket Stream</title>
+  <script src="https://cdn.jsdelivr.net/npm/flv.js@latest"></script>
+  <script src="mpegts.js"></script>
+</head>
+<body>
+  <h2>Media player</h2>
+  <video id="videoElement" controls autoplay muted style="width: 640px; height: 360px;"></video>
+  <br/>
+  <br/>
+  <video id="videoElement2" controls autoplay muted style="width: 640px; height: 360px;"></video>
+  <br/>
+  <br/>
+  <label for="wss_url">WebSocket URL:</label>
+  <input type="text" id="wss_url" value="ws://localhost:8765" style="width: 300px;height:50;"/>
+  <button id="startStream_1"  style="width:100px; height:30px;">play 1</button>
+  <button id="startStream_2"  style="width:100px; height:30px;">play 2</button>
+  <button id="startStream_all"  style="width:100px; height:30px;">play all</button>
+
+
+   
+
+  <script>
+    
+    let flvPlayer = null;    
+    let mpegtsPlay = null;    
+    let isFlvPlay = false;
+    let isMpegtsPlay = false;
+
+    function getWebSocketUrl() {
+      const wssUrlInput = document.getElementById('wss_url');
+      return wssUrlInput.value.trim();
+    }
+
+
+
+    function mpegts_play() {
+      const wss_url = getWebSocketUrl();
+      if (!wss_url) {
+        alert("please input WebSocket URL");
+        return;
+      }
+
+      if (!isMpegtsPlay) {
+        const videoElement2 = document.getElementById('videoElement2');
+        videoElement2.muted = false;
+       
+
+        if (mpegts.getFeatureList().mseLivePlayback) {
+          mpegtsPlay = mpegts.createPlayer({
+            type: 'flv',
+            url: wss_url,
+            isLive: true,
+          },{
+            liveBufferLatencyChasing: true, // 开启追帧
+            liveBufferLatencyMaxLatency: 1.5, // 最大延迟时间
+            liveBufferLatencyMinRemain: 0.1, // 最小剩余时间  
+            
+      
+
+          //enableWorker: false,
+          //enableStashBuffer: false,
+          //stashInitialSize: 384,
+          //liveBufferLatencyChasing: true,
+          //liveBufferLatencyMaxLatency: 1.5,
+          //liveBufferLatencyMinRemain: 0.1,
+          //autoCleanupSourceBuffer: true,
+          //autoCleanupMinBackwardDuration: 30,
+          //autoCleanupMaxBackwardDuration: 60,
+
+          });
+
+          mpegtsPlay.on(mpegts.Events.ERROR, e=> {
+            console.log('发生异常')
+          });
+          mpegtsPlay.on(mpegts.Events.LOADING_COMPLETE, (e) => {
+            console.log("直播已结束");
+          });
+
+          mpegtsPlay.on(mpegts.Events.STATISTICS_INFO, (e) => {
+            console.log("解码帧：",e.decodedFrames); // 已经解码的帧数
+          });
+
+          mpegtsPlay.attachMediaElement(videoElement2);
+          mpegtsPlay.load();
+          mpegtsPlay.play();
+          document.getElementById('startStream_2').innerText = "stop 2";
+        } else {
+          alert("mpegts.js don't support this browser");
+        }
+      } else {
+          mpegtsPlay.unload();
+          mpegtsPlay.detachMediaElement();  
+          mpegtsPlay.destroy();
+           document.getElementById('startStream_2').innerText = "play 2";
+        }
+
+        isMpegtsPlay = !isMpegtsPlay;
+    }
+
+
+
+    function flv_play(){
+      const wss_url = getWebSocketUrl();
+      if (!wss_url) {
+        alert("please input WebSocket URL");
+        return;
+      }
+
+      if(!isFlvPlay){
+
+        if (flvjs.isSupported()) {
+          const videoElement = document.getElementById('videoElement');
+          videoElement.muted = false;
+          
+          flvPlayer = flvjs.createPlayer({
+            type: 'flv',
+            isLive: true,
+            url: wss_url,
+            //enableWorker: true,
+            //enableStashBuffer: false,
+            //stashInitialSize: 128, //   reduce to wait time for the first frame display    
+            
+            enableWorker: true,
+            //lazyLoadMaxDuration: 3*60,
+            enableStashBuffer: false,
+            fixAudioTimestampGap: false,
+            autoCleanupSourceBuffer: true,
+            isLive: true,
+          });
+
+          flvPlayer.attachMediaElement(videoElement);
+          flvPlayer.load();
+          flvPlayer.play();
+          } else {
+            alert("flv.js don't support this browser");
+          }
+
+          document.getElementById('startStream_1').innerText = "stop 1";
+
+      }else {
+        if(flvPlayer){
+          flvPlayer.unload();
+          flvPlayer.detachMediaElement();
+          flvPlayer.destroy();
+          
+        } else {
+          alert("don't have player");
+        }
+        document.getElementById('startStream_1').innerText = "play 1";
+      }
+      
+      isFlvPlay = !isFlvPlay;
+    }
+
+
+    
+    function button_clicked_all(){
+      flv_play();
+      mpegts_play();
+    }
+
+
+    function button_clicked_1(){
+      flv_play();
+    }
+
+
+    function button_clicked_2(){
+      mpegts_play();
+    }
+
+    
+    document.getElementById('startStream_all').addEventListener('click', button_clicked_all);
+    document.getElementById('startStream_1').addEventListener('click', button_clicked_1);
+    document.getElementById('startStream_2').addEventListener('click', button_clicked_2);
+  </script>
+</body>
+</html>
