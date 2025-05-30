@@ -1,0 +1,147 @@
+import asyncio
+import websockets
+import os
+import sys
+import time
+
+
+class MediaWebSocketServer:
+    def __init__(self, host='localhost', port=8765):
+        self.host = host
+        self.port = port
+        self.clients = []
+        self.file_start_index = 10000000
+        self.current_path = os.path.dirname(os.path.abspath(__file__))
+        self.current_path = os.path.join(self.current_path, "data")
+
+    def load_file(self, file_path):
+        with open(file_path, 'rb') as file:
+            return file.read()
+        return None
+
+    def load_media_file(self, file_index):
+        audio_filename = f"audio_{file_index}.data"
+        video_filename = f"video_{file_index}.data"
+        audio_file_path = os.path.join(self.current_path, f"{audio_filename}")
+        video_file_path = os.path.join(self.current_path, f"{video_filename}")
+        audio_data = None
+        video_data = None
+        if os.path.exists(audio_file_path):
+            audio_data = self.load_file(audio_file_path)
+        if os.path.exists(video_file_path):
+            video_data = self.load_file(video_file_path)
+        return audio_data, video_data
+
+    async def send_flv_data(self, websocket):
+        file_index = self.file_start_index
+        mgr = None
+        codec = None
+        try:
+            mgr = MediaAssemblerManager()
+            mgr.add(AudioStreamAssembler('audio_1'))
+            mgr.add(VideoStreamAssembler('video_1', 512, 512))
+            codec = FlvCodec({
+                'codec': 'aac',
+                'rate': 16000,
+                'layout': 'mono',
+                'channels': 2}, {
+                'codec': 'h264',
+                'width': 512,
+                'height': 512,
+                'options': {'preset': 'ultrafast',  # optimize encoder
+                            'gop_size': '12',
+                            # 'bframes': '0', # remove the B frame
+                            'crf': '23'},   # it's to encode quality of Good balance
+                'rate': 24})
+            frame_count = 0
+            pre_frame_state = True
+            while True:
+                encode_start_time = time.time() 
+                
+                audio_data, video_data = self.load_media_file(file_index)
+                if audio_data is None and video_data is None:
+                    print("No more media files to send.")
+                    break
+                file_index += 1
+                    
+                    
+                assembler = mgr.get('audio_1')
+                audio_frame, audio_time = assembler.from_bytes(audio_data)
+                assembler = mgr.get('video_1')
+                video_frame, video_time = assembler.from_bytes(video_data)
+                buffer = codec.encode(audio_frame, video_frame)
+                
+                
+                encode_end_time = time.time()
+                deviation_time = encode_end_time - encode_start_time
+                
+                if buffer is not None:                  
+                    sleep_time = (video_time / 1000 - deviation_time)   # Convert to seconds                   
+                    if len(buffer) > 0:                                    
+                        await websocket.send(buffer)
+                        await asyncio.sleep(sleep_time)
+                    print(f"Sent FLV data: data size={len(buffer)},video_pts={video_frame.pts}, sleep_time={sleep_time:.4f}, elapsed={deviation_time:.4f}s")
+
+                    pre_frame_state = True
+                else:
+                    print(f"not Sent FLV data: data size={len(buffer)},video_pts={video_frame.pts}, sleep_time={sleep_time:.4f}, elapsed={deviation_time:.4f}s")
+                    pre_frame_state = False
+                    print("No data to send, skipping...")
+
+
+                frame_count += 1
+                
+        except websockets.exceptions.ConnectionClosed:
+            print("Connection closed by client, stopping FLV data transmission.")
+        except Exception as e:
+            print(f"Error sending FLV data: {e}")
+        finally:
+            codec.close()
+            mgr.close()
+
+    async def send_media_data(self, websocket):
+        print("New client connected")
+        self.clients.append(websocket)       
+        try:
+            await self.send_flv_data(websocket)
+            async for message in websocket:
+                print(f"Received message: {message}")
+                if message == "close":
+                    print("Closing connection as requested by client")
+                    break
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"Connection closed: Code={e.code}, Reason={e.reason}")
+        finally:
+            print(f"Client disconnected {websocket.remote_address}")
+            self.clients.remove(websocket)
+    
+    async def start(self):
+        async with websockets.serve(self.send_media_data, self.host, self.port):
+            print("WebSocket server started on ws://localhost:8765")
+            await asyncio.Future()
+
+    def stop(self):
+        print("Stopping WebSocket server")
+        # Here you would implement the logic to stop the server and close connections
+
+    def broadcast(self, message):
+        print(f"Broadcasting message: {message}")
+        for client in self.clients:
+            try:
+                asyncio.create_task(client.send(message))
+            except websockets.ConnectionClosed:
+                print("Client connection closed, removing from list")
+                self.clients.remove(client)
+
+
+if __name__ == "__main__":
+    root_path = os.getcwd()
+    sys.path.append(root_path)
+    from app.common.media.assembler import MediaAssemblerManager, AudioStreamAssembler, VideoStreamAssembler
+    from app.common.media.flv import FlvCodec
+
+    server = MediaWebSocketServer()
+    try:
+        asyncio.run(server.start())
+    except KeyboardInterrupt:
+        server.stop()
