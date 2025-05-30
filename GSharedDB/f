@@ -1,0 +1,57 @@
+from .codec import MediaCodec
+import fractions
+from av import AudioFrame, VideoFrame
+
+
+class FlvCodec:
+
+    def __init__(self, audio_config: dict = None, video_config: dict = None):
+        self.codec = MediaCodec()
+        self.codec.add_codec('flv-codec', 'flv')
+
+        if audio_config is not None:
+            self.__init_audio(config=audio_config)
+        if video_config is not None:
+            self.__init_video(config=video_config)
+
+    def __init_video(self, config: dict):
+        width = config.get('width', 300)
+        height = config.get('height', 300)
+        rate = config.get('rate', 24)
+        codec_name = config.get('codec', 'h264')
+        pix_fmt = config.get('pix_fmt', 'yuv420p')
+        options = config.get('options', {})
+        time_base = config.get('time_base', fractions.Fraction(1, rate))
+
+        self._video_stream = self.codec.encoder.add_stream(codec_name, rate=rate)
+        self._video_stream.width = width
+        self._video_stream.height = height
+        self._video_stream.pix_fmt = pix_fmt
+        self._video_stream.options = options
+        self._video_stream.time_base = time_base
+        self._pts = 0
+
+    def __init_audio(self, config: dict):
+        codec_name = config.get('codec', 'aac')
+        rate = config.get('rate', 16000)
+        channels = config.get('channels', 2)
+        layout = config.get('layout', 'mono')
+
+        self._audio_stream = self.codec.encoder.add_stream(codec_name, rate=rate)
+        self._audio_stream.channels = channels
+        self._audio_stream.layout = layout
+        self._audio_stream.time_base = fractions.Fraction(1, rate)
+        self._audio_stream.sample_rate = rate
+
+    def is_flv_bytes(self, data: bytes) -> bool:
+        return data[:3] == b'FLV'
+
+    def encode(self, audio_stream: AudioFrame, video_frame: VideoFrame):
+        data = self.codec.encoder.process(audio=audio_stream, video=video_frame)
+        return data
+
+    def close(self):
+        self.codec.close()
+        self._video_stream = None
+        self._audio_stream = None
+        self.codec = None
